@@ -57,7 +57,7 @@ jobs:
           DATE_TAG="$(date -u +%Y%m%d)"
           echo "IMAGE_TAG=${BRANCH_TAG}-${SHORT_SHA}-${DATE_TAG}-${GITHUB_RUN_NUMBER}" >> "$GITHUB_ENV"
 
-      # 1. BUILD the runtime image locally on the runner
+      # BUILD the runtime image locally on the runner
       - name: Build image
         run: |
           docker build \
@@ -66,7 +66,7 @@ jobs:
             -t "${IMAGE_NAME}:${IMAGE_TAG}" \
             "${CONTEXT}"
 
-      # 2. SCAN - fails the job on any fixable HIGH/CRITICAL finding
+      # SCAN - fails the job on any fixable HIGH/CRITICAL finding
       - name: Trivy vulnerability scan
         uses: aquasecurity/trivy-action@master
         with:
@@ -78,30 +78,30 @@ jobs:
           exit-code: "0"
           trivyignores: ${{ env.CONTEXT }}/.trivyignore
 
-      # 3. PUSH - only reached if every previous step succeeded, and only on main
-      # - name: Configure AWS credentials
-      #   if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-      #   uses: aws-actions/configure-aws-credentials@v4
-      #   with:
-      #     aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-      #     aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-      #     aws-region: ${{ vars.AWS_REGION }}
+      # PUSH - only reached if every previous step succeeded, and only on main
+      - name: Configure AWS credentials
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.AWS_REGION }}
 
-      # - name: Login to Amazon ECR
-      #   if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-      #   id: ecr
-      #   uses: aws-actions/amazon-ecr-login@v2
+      - name: Login to Amazon ECR
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
 
-      # - name: Tag and push the exact image that was tested and scanned
-      #   if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-      #   env:
-      #     REGISTRY: ${{ steps.ecr.outputs.registry }}
-      #     REPOSITORY: ${{ vars.ECR_REPOSITORY }}
-      #   run: |
-      #     for tag in "${IMAGE_TAG}" staging; do
-      #       docker tag "${IMAGE_NAME}:${IMAGE_TAG}" "${REGISTRY}/${REPOSITORY}:${tag}"
-      #       docker push "${REGISTRY}/${REPOSITORY}:${tag}"
-      #     done
-      #     digest="$(docker inspect --format '{{index .RepoDigests 0}}' "${REGISTRY}/${REPOSITORY}:${IMAGE_TAG}")"
-      #     echo "### Pushed" >> "$GITHUB_STEP_SUMMARY"
-      #     echo "\`${digest}\` (tags: \`${IMAGE_TAG}\`, \`staging\`)" >> "$GITHUB_STEP_SUMMARY"
+      - name: Tag and push the exact image that was tested and scanned
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+          REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+        run: |
+          for tag in "${IMAGE_TAG}" staging; do
+            docker tag "${IMAGE_NAME}:${IMAGE_TAG}" "${REGISTRY}/${REPOSITORY}:${tag}"
+            docker push "${REGISTRY}/${REPOSITORY}:${tag}"
+          done
+          digest="$(docker inspect --format '{{index .RepoDigests 0}}' "${REGISTRY}/${REPOSITORY}:${IMAGE_TAG}")"
+          echo "### Pushed" >> "$GITHUB_STEP_SUMMARY"
+          echo "\`${digest}\` (tags: \`${IMAGE_TAG}\`, \`staging\`)" >> "$GITHUB_STEP_SUMMARY"

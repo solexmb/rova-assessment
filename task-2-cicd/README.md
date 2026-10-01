@@ -1,152 +1,276 @@
-# Task 2 - Containerised API with a test -> scan -> push pipeline
+# Task 2 - Containerised API with a CI pipeline
 
 ## Overview
-A small stateless REST API (Python, stdlib WSGI + gunicorn) packaged with a **multi-stage, non-root
-Dockerfile**, built/tested/scanned/pushed by **GitHub Actions** to **Amazon ECR**.
 
-*Why:* GitHub Actions runs in the same repo (as requested); Trivy is a single free scanner covering OS + library CVEs.
-The ECR repository and AWS credentials are **assumed to already exist** - this task is about the pipeline, not provisioning the registry.
+This repository contains a small stateless REST API written in Python (stdlib WSGI + gunicorn), packaged as a multi-stage Docker image, and validated by a GitHub Actions pipeline.
 
-Workflows live in the repo root (GitHub requires `.github/workflows/`):
-`.github/workflows/task-2-ci.yml` and `.github/workflows/task-2-promote.yml`.
+The pipeline currently does the following:
 
-## Pipeline flow (every push to `main`)
+- runs Python unit tests
+- builds the runtime Docker image
+- scans the image with Trivy
+- pushes the built image to Amazon ECR when AWS credentials and repository configuration are present
 
-```
- push to main
-     |
-     v
- [1 Build]  docker build --target runtime  ------------------------------+
-     |                                                                    |
-     v                                                                    |
- [2 Test ]  docker build --target test   (runs unittest; fail => stop)    |
-     |                                                                    |
-     v                                                                    |
- [  Smoke]  assert UID != 0, container answers GET /health                |
-     |                                                                    |
-     v                                                                    |
- [3 Scan ]  Trivy on the built image; any fixable HIGH/CRITICAL => FAIL   |
-     |                                                                    |
-     v         (only if every step above passed AND event == push to main)|
- [4 Push ]  AWS creds (GitHub secrets) -> ECR login -> push <git-sha> + staging
-```
-Steps run sequentially in one job, so a failure anywhere stops everything after it; the push steps are the last ones and
-carry `if: push && main`. The **same image** that was tested and scanned is the one pushed (no rebuild).
-Pull requests run steps 1-3 but never push: the AWS steps are skipped, and GitHub does not expose repository secrets to workflows from forks.
+The workflow lives in the repository root under:
+
+- `.github/workflows/task-2-ci.yml`
+
+This task focuses on the CI/CD pattern, image hardening, and vulnerability gating rather than provisioning AWS infrastructure.
+How an image would be promoted from staging to production is documented at the end of this file as a design; it is not
+implemented in the workflow.
 
 ## API
+
 | Method | Path | Notes |
 |---|---|---|
 | GET | `/health` | liveness/readiness |
-| GET | `/version` | returns git SHA baked in at build |
-| GET | `/api/v1/greet/<name>` | validates name |
-| POST | `/api/v1/sum` | `{"numbers":[1,2.5]}` -> `{"sum":3.5}` |
+| GET | `/version` | returns the git SHA baked into the image at build time |
+| GET | `/api/v1/greet/<name>` | validates the name parameter |
+| POST | `/api/v1/sum` | accepts JSON like `{"numbers":[1,2.5]}` and returns `{"sum":3.5}` |
+
+## Current pipeline flow
+
+The repository currently contains one workflow:
+
+- `.github/workflows/task-2-ci.yml`
+
+The current job flow is:
+
+1. `test` job
+   - checks out the repo
+   - installs Python dependencies
+   - runs pytest against `task-2-cicd/tests`
+
+2. `build-test-scan-push` job
+   - builds the runtime image with Docker
+   - runs Trivy on the built image
+   - fails the workflow if a fixable HIGH or CRITICAL vulnerability is found
+   - if AWS credentials and ECR variables are configured, pushes the image to ECR
+
+Pull requests run the build and scan path, but the ECR push is guarded behind `if: github.event_name == 'push' && github.ref == 'refs/heads/main'`.
 
 ## Dockerfile highlights
-- **Multi-stage**: `builder` (installs deps into a venv) -> `test` (runs the unit tests; never shipped) -> `runtime` (copies only the venv and app code; no pip cache, no tests, no build tooling).
-- **Non-root**: fixed numeric `USER 10001:10001` (verifiable by Kubernetes `runAsNonRoot`); the pipeline asserts it.
-- `HEALTHCHECK`, `slim` base, no shell login for the user, `PYTHONDONTWRITEBYTECODE`.
+
+- Multi-stage build:
+  - `builder` installs dependencies into a virtual environment
+  - `test` stage runs tests
+  - `runtime` stage copies only what the app needs
+- Non-root runtime:
+  - fixed numeric user `USER 10001:10001`
+- Health checks and runtime hygiene:
+  - `HEALTHCHECK`
+  - slim base image
+  - no pip cache in final layer
+  - `PYTHONDONTWRITEBYTECODE`
 
 ## Prerequisites
-- Docker, Python 3.10+, a GitHub repo containing this code.
-- **Assumed to exist already (not created by this repo):**
-  - An Amazon ECR repository (e.g. `ha-web-api`) in your chosen region.
-  - AWS credentials able to push to it (see below).
 
-If you don't have a repository yet, one command creates it (with scan-on-push enabled):
-```bash
-aws ecr create-repository --repository-name ha-web-api --region us-east-1 \
-  --image-scanning-configuration scanOnPush=true
-```
+To run locally:
 
-## Setup & run
+- Docker
+- Python 3.12
+- GitHub repository containing this code
 
-### Run locally
+For the ECR push path, the following must exist:
+
+- an Amazon ECR repository
+- IAM credentials able to push to it
+- GitHub Actions secrets and variables configured
+
+## Local development
+
+### Run unit tests
+
 ```bash
 cd task-2-cicd
-python3 -m unittest discover -s tests -t . -v                  # unit tests
+python3 -m unittest discover -s tests -t . -v
+```
+
+### Build the image locally
+
+```bash
+cd task-2-cicd
 docker build -t ha-web-api:local --build-arg GIT_SHA=local .
+```
+
+### Run the container locally
+
+```bash
 docker run --rm -p 8080:8080 ha-web-api:local
 curl localhost:8080/health
 curl -X POST localhost:8080/api/v1/sum -d '{"numbers":[1,2,3]}'
-docker run --rm --entrypoint id ha-web-api:local -u            # 10001 (non-root)
+docker run --rm --entrypoint id ha-web-api:local -u
 ```
 
-### Configure GitHub (Settings -> Secrets and variables -> Actions)
+The last command should return a non-root UID, typically `10001`.
 
-| Type | Name | Value |
+## GitHub Actions configuration
+
+To enable the ECR push path, configure these secrets and variables in GitHub:
+
+| Type | Name | Example value |
 |---|---|---|
-| Secret | `AWS_ACCESS_KEY_ID` | access key of a push-only IAM user |
-| Secret | `AWS_SECRET_ACCESS_KEY` | its secret key |
-| Variable | `AWS_REGION` | e.g. `us-east-1` |
-| Variable | `ECR_REPOSITORY` | e.g. `ha-web-api` |
+| Secret | `AWS_ACCESS_KEY_ID` | access key for an IAM user with ECR push permissions |
+| Secret | `AWS_SECRET_ACCESS_KEY` | its matching secret key |
+| Variable | `AWS_REGION` | `us-east-1` |
+| Variable | `ECR_REPOSITORY` | `ha-web-api` |
 
-Use a **dedicated IAM user with least privilege**, not an admin key. Policy (replace region/account/repo):
+The workflow is already written to use those values.
+
+## ECR setup
+
+If you want to test the ECR push path in AWS, you can create a repository like this:
+
+```bash
+aws ecr create-repository \
+  --repository-name ha-web-api \
+  --region us-east-1 \
+  --image-scanning-configuration scanOnPush=true
+```
+
+Use a dedicated IAM principal with least privilege. A typical policy is:
+
 ```json
 {
   "Version": "2012-10-17",
   "Statement": [
-    { "Effect": "Allow", "Action": "ecr:GetAuthorizationToken", "Resource": "*" },
-    { "Effect": "Allow",
+    {
+      "Effect": "Allow",
+      "Action": "ecr:GetAuthorizationToken",
+      "Resource": "*"
+    },
+    {
+      "Effect": "Allow",
       "Action": [
-        "ecr:BatchCheckLayerAvailability", "ecr:BatchGetImage", "ecr:CompleteLayerUpload",
-        "ecr:DescribeImages", "ecr:GetDownloadUrlForLayer", "ecr:InitiateLayerUpload",
-        "ecr:PutImage", "ecr:UploadLayerPart"
+        "ecr:BatchCheckLayerAvailability",
+        "ecr:BatchGetImage",
+        "ecr:CompleteLayerUpload",
+        "ecr:DescribeImages",
+        "ecr:GetDownloadUrlForLayer",
+        "ecr:InitiateLayerUpload",
+        "ecr:PutImage",
+        "ecr:UploadLayerPart"
       ],
-      "Resource": "arn:aws:ecr:us-east-1:<ACCOUNT_ID>:repository/ha-web-api" }
+      "Resource": "arn:aws:ecr:us-east-1:<ACCOUNT_ID>:repository/ha-web-api"
+    }
   ]
 }
 ```
-Keys live only in GitHub encrypted secrets - never in the repo.
 
-Then `git push origin main` and check the **Actions** tab; the run summary prints the pushed image digest.
-
-To verify the gates: (a) break a test assertion -> the job fails before scan/push; (b) add a known-vulnerable pinned dependency
-to `requirements.txt` (or use an old base image) -> Trivy fails the job; nothing reaches ECR.
+Never commit AWS keys into the repo. Keep them in GitHub encrypted secrets.
 
 ## Vulnerability policy
-- Fails on **HIGH or CRITICAL** (`severity: HIGH,CRITICAL`, `exit-code: 1`), for OS packages and libraries.
-- `ignore-unfixed: true`: only blocks on vulnerabilities **that have a fix available**. Unfixed base-image CVEs would otherwise make
-  the build red with nothing the team can do. This is a deliberate trade-off; if the brief intends *every* HIGH to block, remove that line.
-- Exceptions go in `.trivyignore` with justification + review date (currently empty).
-- ECR `scan_on_push` is enabled as a second, registry-side check (and continuous scanning is an easy upgrade).
 
-## Promoting an image: staging -> production
-**Principle: build once, promote the same immutable artifact.** Never rebuild for production.
+- The workflow fails on any fixable HIGH or CRITICAL vulnerability (`severity: HIGH,CRITICAL`).
+- This applies to both OS packages and application libraries (`vuln-type: os,library`).
+- `ignore-unfixed: true` means only vulnerabilities with a fix available block the build.
+- `exit-code: "1"` causes the workflow to fail before the image is pushed.
+- Exceptions go in `.trivyignore` with a justification and review date.
 
-1. **Identity.** Every build is tagged with its git SHA and has a content digest (`sha256:...`). Deployments reference the digest/SHA, not a tag that can move.
-2. **CI -> staging (automatic).** The push to `main` publishes `<sha>` and moves the `staging` tag. Staging deploys that digest (e.g. ECS service / Kubernetes manifest / Helm values updated by a GitOps commit).
-3. **Staging validation.** Smoke tests, integration/e2e tests and (optionally) a soak period run against staging; migrations are rehearsed.
-4. **Approval gate.** Run the **`task-2 promote image to production`** workflow with the SHA. It targets the GitHub **`production` environment**, where *required reviewers* are configured, so a human approves.
-5. **Promotion = retag, not rebuild.** The workflow copies the staging image manifest to the `production` tag via `ecr put-image` (same digest). The production deploy then rolls out that digest (rolling/blue-green/canary with health checks).
-6. **Rollback.** Redeploy the previous known-good digest (still in ECR thanks to the lifecycle policy); the git SHA tag makes it trivial to identify.
-7. **Hardening for real production.**
-   - Separate AWS accounts for staging and prod (own ECR/roles, blast-radius isolation); promotion via ECR cross-account replication or `crane copy`.
-   - Image signing (cosign/Sigstore) at CI, signature verification in the cluster admission controller; SBOM attestation.
-   - Re-scan the production tag on a schedule (new CVEs appear after build) and alert/rebuild.
-   - Protected branches + required checks, so `main` always reflects reviewed code.
+## Tagging strategy
 
-## Design decisions & trade-offs
-- **stdlib WSGI + gunicorn**: tiny attack surface and one pinned dependency, keeping scans clean and the image small. A real service would likely use FastAPI/Flask.
-- **Tests as a Docker stage**: tests run in the exact environment (Python version, deps) the image uses, with no extra runner setup.
-- **Single sequential job** rather than several jobs: guarantees the pushed image is bit-for-bit the one tested/scanned (no artifact hand-off). Cost: less parallelism. With more time I'd split jobs and pass the image as an artifact or use a build cache.
-- **Static IAM-user keys in GitHub secrets**: the simplest way to authenticate given the registry is assumed to exist. Trade-off: long-lived credentials that must be rotated. The key is least-privilege (push to one repo only) and is only used on `main` pushes. **Production upgrade: GitHub OIDC with an assumable IAM role**, which needs no stored keys - only `role-to-arn` replaces the two key inputs in the workflow.
-- **Mutable ECR tags** so `staging`/`production` can move; SHA tags are the immutable record. Trade-off: mutable repos permit overwriting, so deploy by digest.
-- **Pinned action versions** by tag. With more time: pin by commit SHA and enable Dependabot for actions and the base image.
+The workflow generates an image tag in this format:
 
-## Assumptions
-- "On every push to main" is implemented literally (no path filter), so any push to `main` triggers it.
-- The ECR repository and a least-privilege IAM user already exist; region defaults to `us-east-1`.
-- Staging/production deploy targets are out of scope; promotion is shown at the registry level and documented above.
+- `branch-short_sha-date-run_number`
 
-## What I'd do with more time
-GitHub OIDC instead of static keys, dependency/SBOM scanning (`trivy fs`, Syft), image signing, build cache, multi-arch images, linting (hadolint, ruff), coverage gate, an actual
-staging deployment (ECS Fargate) with automated smoke tests, Dependabot, and Slack/SNS notifications on failure.
+Example:
+
+- `main-abc1234-20261001-42`
+
+This makes each image easy to trace back to a branch, commit, date, and workflow run.
 
 ## Cleanup
-This task provisions nothing itself. To avoid ongoing cost and exposure:
+
+If you create an ECR repository for testing and want to remove it later:
+
 ```bash
-# delete the images (and the repo, if you created it for this exercise)
-aws ecr delete-repository --repository-name ha-web-api --region us-east-1 --force
+aws ecr delete-repository \
+  --repository-name ha-web-api \
+  --region us-east-1 \
+  --force
 ```
-Then delete the IAM user/access keys you created for the pipeline, and remove the GitHub secrets and variables.
+
+Then remove any IAM access keys and GitHub secrets that were added for testing.
+
+## Summary
+
+This repo demonstrates:
+
+- a small Python API
+- secure multi-stage Docker build
+- unit test validation
+- image scan gating
+- ECR push for a main-branch pipeline
+
+It is a good baseline for a practical container CI pipeline and is ready to extend with the promotion design below,
+GitHub OIDC, SBOM generation, and deployment automation.
+
+## Promoting an image from staging to production (design, not implemented)
+
+The workflow in this repo stops at pushing the image to ECR. This section describes how I would extend it to deploy to
+staging automatically and to production after an approval. None of it is in `task-2-ci.yml`, and I have not run it.
+
+### Principle: build once, promote the same image
+
+Production never gets a rebuild. It gets exactly the image that passed the unit tests, the Trivy scan and staging.
+
+- The image tag (`branch-short_sha-date-run_number`) is the immutable record of a build. The build job would expose it as
+  a job output so every later job handles the same image.
+- `staging` and `production` would be moving tags in ECR. Promotion re-points one of them at an existing image by
+  copying its manifest, so no new layers are built or pushed and the digest stays identical.
+
+### Proposed pipeline shape
+
+```
+test -> build-test-scan-push -> deploy-staging -> [ manual approval ] -> deploy-production
+                                  (automatic)       (production env)
+```
+
+| Job | Runs when | GitHub environment | Gate |
+|---|---|---|---|
+| `build-test-scan-push` | every push / PR | none | tests and Trivy must pass |
+| `deploy-staging` | push to `main`, after the build job succeeds | `staging` | none (automatic) |
+| `deploy-production` | after `deploy-staging` succeeds | `production` | required reviewers |
+
+Each job would depend on the previous one with `needs:`, so a failure anywhere stops everything after it. The production
+job could not even be queued unless staging deployed and passed its smoke test.
+
+### Sketch of the extra jobs
+
+```yaml
+  deploy-staging:
+    needs: build-test-scan-push
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: staging
+    ### staging deploy
+
+  deploy-production:
+    needs: [build-test-scan-push, deploy-staging]
+    runs-on: ubuntu-latest
+    environment: production        # the approval gate attaches here
+    #### production deploy
+
+```
+
+### Approval gate with GitHub environments
+
+Configured once under Settings -> Environments:
+
+1. Create a `staging` environment with no protection rules.
+2. Create a `production` environment and enable:
+   - **Required reviewers**: the specific people or team allowed to approve (for example release managers).
+   - **Prevent self-review**: the person who pushed the change cannot approve their own production deploy.
+   - **Deployment branches**: restrict to `main`.
+3. Store the AWS credentials and the application URL as **environment** secrets and variables, with separate
+   least-privilege credentials for production. Environment secrets are only released to the job after approval, so
+   production credentials cannot be used before a reviewer signs off.
+
+What this would enforce:
+
+- **Ordering:** `needs: deploy-staging` makes production wait for a successful staging deploy.
+- **Who approves:** the production job pauses as "Waiting for review" and only the listed reviewers can release it.
+  GitHub records who approved and when.
+- **Scope of the approval:** only the `deploy-production` job references the `production` environment, so the approval
+  covers the staging-to-production step and nothing else.
+

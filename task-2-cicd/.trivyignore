@@ -1,0 +1,3 @@
+# Documented, time-boxed exceptions only. One CVE ID per line, each with a
+# comment explaining why it is accepted and a review/expiry date.
+# Intentionally empty: no exceptions are currently accepted.

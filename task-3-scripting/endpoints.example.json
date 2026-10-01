@@ -1,0 +1,12 @@
+{
+  "defaults": { "expected_status": 200, "timeout": 5 },
+  "endpoints": [
+    { "name": "github.com",  "url": "https://github.com" },
+    { "name": "expects-404",  "url": "https://example.com/does-not-exist", "expected_status": 404 },
+    { "name": "expects-301",  "url": "https://google.com", "expected_status": 301 },
+    { "name": "any-2xx-ok",   "url": "https://www.google.com", "expected_status": [200, 204] }
+  ],
+  "disabled_endpoints": [
+    { "name": "google.com",   "url": "https://google.com" }
+  ]
+}

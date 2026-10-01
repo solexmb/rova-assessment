@@ -77,7 +77,7 @@ jobs:
           severity: HIGH,CRITICAL
           ignore-unfixed: true
           vuln-type: os,library
-          exit-code: "0"
+          exit-code: "1"
           trivyignores: ${{ env.CONTEXT }}/.trivyignore
 
       # PUSH - only reached if every previous step succeeded, and only on main

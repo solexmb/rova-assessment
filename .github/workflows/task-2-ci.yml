@@ -30,10 +30,11 @@ jobs:
           cache: pip
       - name: Install dependencies
         run: |
+          cd task-2-cicd
           pip install -r requirements.txt
           pip install pytest==8.3.4 httpx==0.28.1
       - name: Run pytest
-        run: python -m pytest tests/ -v --tb=short
+        run: cd task-2-cicd && python -m pytest tests/ -v --tb=short
 
   build-test-scan-push:
     runs-on: ubuntu-latest

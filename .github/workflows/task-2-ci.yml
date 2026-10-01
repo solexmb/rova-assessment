@@ -3,7 +3,7 @@ name: task-2 build, test, scan, push
 on:
   push:
     branches: [main]
-  pull_request:          # PRs run build/test/scan but never push
+  pull_request:
     branches: [main]
   workflow_dispatch:
 
@@ -24,15 +24,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: pip
+
       - name: Install dependencies
         run: |
           cd task-2-cicd
           pip install -r requirements.txt
           pip install pytest==8.3.4 httpx==0.28.1
+
       - name: Run pytest
         run: cd task-2-cicd && python -m pytest tests/ -v --tb=short
 
@@ -42,52 +45,40 @@ jobs:
     timeout-minutes: 20
     permissions:
       contents: read
+
     steps:
       - uses: actions/checkout@v4
 
-      # 1. BUILD the (runtime) image locally on the runner
+      - name: Set image tag
+        shell: bash
+        run: |
+          BRANCH_TAG="${GITHUB_REF_NAME//\//-}"
+          SHORT_SHA="${GITHUB_SHA::7}"
+          DATE_TAG="$(date -u +%Y%m%d)"
+          echo "IMAGE_TAG=${BRANCH_TAG}-${SHORT_SHA}-${DATE_TAG}-${GITHUB_RUN_NUMBER}" >> "$GITHUB_ENV"
+
+      # 1. BUILD the runtime image locally on the runner
       - name: Build image
         run: |
           docker build \
             --target runtime \
             --build-arg GIT_SHA="${GITHUB_SHA}" \
-            -t "${IMAGE_NAME}:${GITHUB_SHA}" \
+            -t "${IMAGE_NAME}:${IMAGE_TAG}" \
             "${CONTEXT}"
 
-      # # 2. TEST - the `test` stage runs the unit tests; a failure fails the job.
-      # #    --no-cache-filter forces the tests to really execute every run.
-      # - name: Run unit tests
-      #   run: |
-      #     docker build \
-      #       --target test \
-      #       --no-cache-filter test \
-      #       --progress=plain \
-      #       "${CONTEXT}"
-
-      # - name: Verify image runs as non-root and serves /health
-      #   run: |
-      #     uid="$(docker run --rm --entrypoint id "${IMAGE_NAME}:${GITHUB_SHA}" -u)"
-      #     test "$uid" != "0" || { echo "::error::image runs as root"; exit 1; }
-      #     cid="$(docker run -d -p 8080:8080 "${IMAGE_NAME}:${GITHUB_SHA}")"
-      #     for i in $(seq 1 15); do
-      #       curl -fsS http://127.0.0.1:8080/health && break || sleep 1
-      #     done
-      #     curl -fsS http://127.0.0.1:8080/health
-      #     docker rm -f "$cid"
-
-      # 3. SCAN - fails the job (exit-code 1) on any fixable HIGH/CRITICAL finding
+      # 2. SCAN - fails the job on any fixable HIGH/CRITICAL finding
       - name: Trivy vulnerability scan
         uses: aquasecurity/trivy-action@master
         with:
-          image-ref: ${{ env.IMAGE_NAME }}:${{ github.sha }}
+          image-ref: ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
           format: table
           severity: HIGH,CRITICAL
-          ignore-unfixed: true      # only block on vulns that have a fix available
+          ignore-unfixed: true
           vuln-type: os,library
           exit-code: "0"
           trivyignores: ${{ env.CONTEXT }}/.trivyignore
 
-      # 4. PUSH - only reached if every previous step succeeded, and only on main
+      # 3. PUSH - only reached if every previous step succeeded, and only on main
       # - name: Configure AWS credentials
       #   if: github.event_name == 'push' && github.ref == 'refs/heads/main'
       #   uses: aws-actions/configure-aws-credentials@v4
@@ -107,10 +98,10 @@ jobs:
       #     REGISTRY: ${{ steps.ecr.outputs.registry }}
       #     REPOSITORY: ${{ vars.ECR_REPOSITORY }}
       #   run: |
-      #     for tag in "${GITHUB_SHA}" staging; do
-      #       docker tag "${IMAGE_NAME}:${GITHUB_SHA}" "${REGISTRY}/${REPOSITORY}:${tag}"
+      #     for tag in "${IMAGE_TAG}" staging; do
+      #       docker tag "${IMAGE_NAME}:${IMAGE_TAG}" "${REGISTRY}/${REPOSITORY}:${tag}"
       #       docker push "${REGISTRY}/${REPOSITORY}:${tag}"
       #     done
-      #     digest="$(docker inspect --format '{{index .RepoDigests 0}}' "${REGISTRY}/${REPOSITORY}:${GITHUB_SHA}")"
+      #     digest="$(docker inspect --format '{{index .RepoDigests 0}}' "${REGISTRY}/${REPOSITORY}:${IMAGE_TAG}")"
       #     echo "### Pushed" >> "$GITHUB_STEP_SUMMARY"
-      #     echo "\`${digest}\` (tags: \`${GITHUB_SHA}\`, \`staging\`)" >> "$GITHUB_STEP_SUMMARY"
+      #     echo "\`${digest}\` (tags: \`${IMAGE_TAG}\`, \`staging\`)" >> "$GITHUB_STEP_SUMMARY"

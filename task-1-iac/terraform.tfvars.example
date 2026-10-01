@@ -1,0 +1,9 @@
+aws_region  = "us-east-1"
+project     = "ha-web"
+environment = "dev"
+owner       = "your-name-or-team"
+
+# Cost levers
+enable_nat_gateway = true # false saves ~$32/mo; demo app doesn't need egress (but SSM access is lost)
+single_nat_gateway = true # false = one NAT per AZ (production)
+instance_type      = "t3.micro"

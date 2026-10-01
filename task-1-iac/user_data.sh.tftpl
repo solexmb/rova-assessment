@@ -1,0 +1,52 @@
+#!/bin/bash
+# Bootstraps a static page served by python3 (preinstalled on AL2023), so the
+# instance needs NO outbound internet to become healthy - important because the
+# NAT gateway is optional. The page shows instance ID + AZ so you can watch the
+# ALB rotate across Availability Zones.
+set -euxo pipefail
+
+TOKEN=$(curl -sS -X PUT "http://169.254.169.254/latest/api/token" \
+  -H "X-aws-ec2-metadata-token-ttl-seconds: 300")
+md() { curl -sS -H "X-aws-ec2-metadata-token: $TOKEN" "http://169.254.169.254/latest/meta-data/$1"; }
+
+INSTANCE_ID=$(md instance-id)
+AZ=$(md placement/availability-zone)
+PRIVATE_IP=$(md local-ipv4)
+
+mkdir -p /opt/web
+cat > /opt/web/index.html <<HTML
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>${project} (${environment})</title></head>
+<body style="font-family: sans-serif; max-width: 40rem; margin: 3rem auto;">
+  <h1>${project} - ${environment}</h1>
+  <p>Served from a private subnet through an Application Load Balancer.</p>
+  <ul>
+    <li><b>Instance:</b> $INSTANCE_ID</li>
+    <li><b>Availability Zone:</b> $AZ</li>
+    <li><b>Private IP:</b> $PRIVATE_IP</li>
+  </ul>
+</body>
+</html>
+HTML
+chmod -R a+rX /opt/web
+
+cat > /etc/systemd/system/web.service <<'UNIT'
+[Unit]
+Description=Static demo web server
+After=network.target
+
+[Service]
+User=nobody
+Group=nobody
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+ExecStart=/usr/bin/python3 -m http.server 80 --directory /opt/web
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+systemctl daemon-reload
+systemctl enable --now web.service

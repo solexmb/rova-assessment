@@ -30,7 +30,7 @@ jobs:
           cache: pip
       - name: Install dependencies
         run: |
-          pip install -r app/requirements.txt
+          pip install -r requirements.txt
           pip install pytest==8.3.4 httpx==0.28.1
       - name: Run pytest
         run: python -m pytest tests/ -v --tb=short

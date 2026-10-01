@@ -74,23 +74,24 @@ backoff schedule (exponential + capped), config file/env parsing, and exit codes
 - **Stdout = data, stderr = logs**, so it composes in pipelines.
 
 ## From script to production monitoring/alerting
-This script is a good *smoke check* or CI/CD gate, but production monitoring needs more. How I would extend it:
+This script is a good smoke check or operational check, but production monitoring needs more. How I would extend it:
 
-1. **Run it on a schedule and ship results.** Run as cron / Kubernetes CronJob / EventBridge-scheduled Lambda or Fargate task every 1-5 min; emit the JSON to CloudWatch Logs, and publish **metrics** (`up`, `latency_ms`, per endpoint) via CloudWatch `put-metric-data` or the Prometheus Pushgateway / a `/metrics` exporter.
-2. **Alert on metrics, not on a single run.** CloudWatch Alarms (or Alertmanager) with rules like "failed in 3 of the last 5 runs" -> SNS/PagerDuty/Slack. This removes flapping alerts, adds recovery notifications, deduplication, severity and escalation/on-call routing.
-3. **Probe from outside and from several regions** (Route 53 health checks, CloudWatch Synthetics canaries, or runners in 2-3 regions) and require quorum before paging, so a single probe's network issue is not an outage.
-4. **Go beyond status codes**: assert on response body/JSON fields, TLS certificate expiry, latency SLO percentiles (p95/p99), and run multi-step synthetic transactions (login -> action).
-5. **Operability**: config in Git with review, secrets (auth headers) from Secrets Manager/SSM never from the repo, structured logs with correlation IDs, a dashboard (Grafana/CloudWatch) with SLO/error-budget burn-rate alerts, runbook links in every alert.
-6. **Or just adopt a tool**: for most teams, Prometheus Blackbox Exporter + Alertmanager, Uptime Kuma, or a SaaS (Datadog/Pingdom) beats maintaining a bespoke checker. This script's value is as a portable gate and as a learning/baseline tool.
+
+1. **Run it on a schedule and publish metrics.**  
+   Run as a long-lived exporter (recommended) or as a CronJob that pushes results every 1–5 minutes; publish metrics such as:
+   - `health_check_up{endpoint="<name>",region="<vantage>"}` (gauge: `1` = up, `0` = down)
+   - `health_check_latency_seconds{endpoint="<name>",quantile="p95"}` (histogram/summary)
+
+   2. **Alert on metrics, not single runs.**  
+   Use Alertmanager (or your alerting system) with rules like “endpoint down in 3 of the last 5 runs” and policies for severity, deduplication, and escalation (Email / PagerDuty / Slack). Aggregating across runs and regions reduces flapping and false positives.
+
+3. **Go beyond status codes.**  
+   Add checks for TLS certificate expiry, latency SLO percentiles (p95/p99), and optionally response-body assertions or multi-step synthetic transactions for critical paths.
 
 ### Limitations of this script
-- **Point-in-time and stateless**: no history, trends, de-duplication, flap detection, or alert routing. Alerting is only "the cron job exited 1".
-- **Single vantage point**: it sees the network from wherever it runs; it cannot distinguish "service down" from "my egress is broken" or regional issues.
-- **Shallow checks**: it validates status and latency of one GET, not correctness, dependencies, TLS expiry, or user journeys. A `200` from a broken page passes.
-- **No authentication flows**, custom headers, non-GET methods or client certs (easy to add, not implemented).
-- **Self-monitoring problem**: if the scheduler or host dies, nothing alerts (needs a dead-man's-switch/heartbeat).
-- **Retries mask intermittent failures** (a flaky service that passes on retry 2 is reported healthy, only visible via `attempts`) - alert on high attempt counts too.
-- **Scale**: one process with a thread pool is fine for tens of endpoints, not thousands.
 
-## Cleanup
-Nothing is provisioned. Delete any `results.json` you wrote (git-ignored).
+- **Point-in-time and stateless**: no history or trends; rely on metrics and a time-series backend for deduplication and trend analysis.
+- **Self-monitoring problem**: if the scheduler dies, nothing alerts — add a heartbeat or dead-man’s switch.
+- **Retries mask intermittent failures**: a flaky service that passes on retry 2 is reported healthy; expose attempt counts and alert on consistently high attempt counts.
+- **Scale**: one process with a thread pool is fine for tens of endpoints; for hundreds or thousands, prefer a scalable exporter or distributed probing solution.
+

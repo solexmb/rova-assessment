@@ -63,10 +63,9 @@ Each result also carries a per-attempt `history` array (status, time, error for 
 cd task-3-scripting && python3 -m unittest discover -s tests -t . -v     # 14 tests, spin up a local HTTP server
 ```
 Covers: pass, fail-after-N-retries (attempt count), recovery on retry, non-200 expectations, redirects, connection refused, the
-backoff schedule (exponential + capped), config file/env parsing, and exit codes 0/1/2. Also run in CI by `.github/workflows/task-3-tests.yml`.
+backoff schedule (exponential + capped), config file/env parsing, and exit codes 0/1/2.
 
 ## Design decisions & trade-offs
-- **Exponential backoff with a cap** protects a struggling service from retry storms and absorbs brief blips (deploys, GC pauses). I did not add jitter; with many checkers hitting one target, add it.
 - **Thread pool** for parallelism - total runtime is bounded by the slowest endpoint rather than the sum. Results keep config order.
 - **Response time = last attempt's time**; every attempt's time is in `history`. Time covers connect + TLS + first 4 KB of the body, not full download.
 - **Retries on any non-expected result** (including 4xx). Simple and predictable; a refinement is to retry only on 5xx/timeouts, since a 404 will not heal.
@@ -74,24 +73,26 @@ backoff schedule (exponential + capped), config file/env parsing, and exit codes
 - **Stdout = data, stderr = logs**, so it composes in pipelines.
 
 ## From script to production monitoring/alerting
-This script is a good smoke check or operational check, but production monitoring needs more. How I would extend it:
 
+This script is a good smoke/operational check, but production monitoring needs more. How I would extend it:
 
 1. **Run it on a schedule and publish metrics.**  
-   Run as a long-lived exporter (recommended) or as a CronJob that pushes results every 1–5 minutes; publish metrics such as:
+   Run as a long‑lived exporter (recommended) or as a CronJob that pushes results every 1–5 minutes; publish metrics such as:
    - `health_check_up{endpoint="<name>",region="<vantage>"}` (gauge: `1` = up, `0` = down)
-   - `health_check_latency_seconds{endpoint="<name>",quantile="p95"}` (histogram/summary)
+   - `health_check_latency_seconds_bucket{endpoint="<name>"}` (histogram) or `health_check_latency_seconds` (summary)
 
-   2. **Alert on metrics, not single runs.**  
-   Use Alertmanager (or your alerting system) with rules like “endpoint down in 3 of the last 5 runs” and policies for severity, deduplication, and escalation (Email / PagerDuty / Slack). Aggregating across runs and regions reduces flapping and false positives.
+   Keep labels small and bounded; avoid using the full URL as a free‑form label. If you run ephemeral CronJobs, either push to a Pushgateway or use a sidecar/long‑lived exporter so the monitoring system can scrape metrics.
+
+2. **Alert on metrics, not single runs.**  
+   Use Alertmanager (or your alerting system) with rules like “endpoint down in 3 of the last 5 runs” and policies for severity, deduplication, and escalation (Email / PagerDuty / Slack). Aggregating across runs and regions reduces flapping and false positives. Also alert on high attempt counts or rising latency (p95/p99) to catch degradations before outright failure.
 
 3. **Go beyond status codes.**  
-   Add checks for TLS certificate expiry, latency SLO percentiles (p95/p99), and optionally response-body assertions or multi-step synthetic transactions for critical paths.
+   Add checks for TLS certificate expiry, latency SLO percentiles (p95/p99), and optionally response‑body assertions or multi‑step synthetic transactions for critical paths.
 
 ### Limitations of this script
 
-- **Point-in-time and stateless**: no history or trends; rely on metrics and a time-series backend for deduplication and trend analysis.
-- **Self-monitoring problem**: if the scheduler dies, nothing alerts — add a heartbeat or dead-man’s switch.
-- **Retries mask intermittent failures**: a flaky service that passes on retry 2 is reported healthy; expose attempt counts and alert on consistently high attempt counts.
-- **Scale**: one process with a thread pool is fine for tens of endpoints; for hundreds or thousands, prefer a scalable exporter or distributed probing solution.
-
+- **Point-in-time and stateless:** no history, trends, de-duplication, flap detection, or alert routing. Rely on metrics and a time-series backend for trend analysis and deduplication.
+- **Shallow checks:** it validates status and latency of one GET, not correctness, dependencies, TLS expiry, or user journeys. A `200` from a broken page passes.
+- **Self-monitoring problem:** if the scheduler dies, nothing alerts — add a heartbeat or dead-man’s switch.
+- **Retries mask intermittent failures:** a flaky service that passes on retry 2 is reported healthy; expose attempt counts and alert on consistently high attempt counts.
+- **Scale:** one process with a thread pool is fine for tens of endpoints; for hundreds or thousands, prefer a scalable exporter or distributed probing solution.

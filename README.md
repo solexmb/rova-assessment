@@ -1,54 +1,121 @@
-# Cloud & Infrastructure practical assessment
+# Cloud & Infrastructure Practical Assessment
 
-Three tasks, one repo. Each folder has its own README with architecture, exact commands, trade-offs, assumptions and cleanup.
+One repository containing all three tasks. Each task folder has its own README with full details.
 
-| Task | Folder | What it is | Stack (one-line why) |
-|---|---|---|---|
-| 1 | [`task-1-iac/`](task-1-iac) | Highly available web app: ALB -> ASG (2 AZs, private subnets, CPU scaling), remote state | Terraform + AWS ALB/ASG/EC2: the direct fit for the brief, no control-plane cost |
-| 2 | [`task-2-cicd/`](task-2-cicd) | Multi-stage non-root container + CI/CD: build -> test -> scan -> push to ECR | GitHub Actions + Trivy + ECR: in-repo and free; registry assumed to exist |
-| 3 | [`task-3-scripting/`](task-3-scripting) | Health-check script with retries/backoff, JSON summary, exit codes | Python stdlib: portable, testable, zero dependencies |
+| Task | Folder | What it is |
+|---|---|---|
+| 1 | [`task-1-iac/`](task-1-iac) | Highly available web app on AWS, provisioned with Terraform |
+| 2 | [`task-2-cicd/`](task-2-cicd) | Containerised API with a test, scan and push pipeline (GitHub Actions to Amazon ECR) |
+| 3 | [`task-3-scripting/`](task-3-scripting) | HTTP health-check script with retries, backoff and JSON output |
 
 ```
 .
-├── .github/workflows/        task-2-ci.yml, task-2-promote.yml, task-3-tests.yml
-├── task-1-iac/               Terraform app stack + bootstrap/ (S3+DynamoDB state backend)
-├── task-2-cicd/              service/ (API), tests/, Dockerfile
-└── task-3-scripting/         health_check.py, tests/, endpoints.example.json
+├── .github/workflows/     CI for Task 2
+├── task-1-iac/            Terraform: VPC, ALB, ASG, remote state (bootstrap/)
+├── task-2-cicd/           API, Dockerfile, unit tests
+└── task-3-scripting/      health_check.py, tests, example config
 ```
 
-## Quick start (prerequisites for everything)
-- AWS account + CLI credentials in your environment (`AWS_PROFILE` or `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`/`AWS_REGION`). Nothing is committed.
-- Terraform >= 1.5, Docker, Python 3.10+, a GitHub repo for the pipeline.
+## 1. Overview
 
-Order I'd run them: **Task 3** (no cloud needed) -> **Task 1** (bootstrap, then app) -> **Task 2** (GitHub secrets/variables, push).
-Point Task 3 at the Task 1 ALB URL (`terraform output app_url`) to health-check the deployed stack.
+- **Task 1: Terraform on AWS.** A VPC with public and private subnets across 2 AZs, an internet-facing Application Load
+  Balancer, and an Auto Scaling Group in private subnets (no public IPs) that scales on CPU. State is stored in S3 with
+  DynamoDB locking. *Why:* Terraform and native AWS services are the most direct fit for the brief, with no extra platform to run or pay for.
+- **Task 2: GitHub Actions and Amazon ECR.** A small Python REST API in a multi-stage, non-root Docker image. The pipeline
+  runs unit tests, builds the image, scans it with Trivy, and pushes to ECR on `main`. HIGH/CRITICAL findings and failing tests
+  fail the build. *Why:* GitHub Actions runs in the same repo, and Trivy is a free scanner covering OS and library CVEs.
+- **Task 3: Python.** A dependency-free health checker driven by a config file or environment variable. *Why:* real JSON output,
+  timeouts and unit tests without relying on shell tooling.
 
-## Cost & cleanup (summary)
-Everything is sized for free tier / low cost, **except the NAT gateway** in Task 1 (~$0.045/hr; can be disabled with `enable_nat_gateway=false`).
-Tear down in this order and confirm in the console that no ALB / NAT / EIP / EC2 / ECR repo remains:
+## 2. Architecture
+
+- **Task 1:** see the diagram in [`task-1-iac/README.md`](task-1-iac/README.md).
+- **Task 2:** see the pipeline flow in [`task-2-cicd/README.md`](task-2-cicd/README.md). In short:
+
+```
+push to main -> unit tests -> build image -> Trivy scan (fail on HIGH/CRITICAL) -> push to ECR (only if everything passed)
+```
+
+The staging-to-production promotion process is documented in the Task 2 README as a design. It is not implemented in the workflow.
+
+## 3. Setup & run
+
+Prerequisites: Terraform >= 1.5, Docker, Python 3.10+, AWS CLI, an AWS account with credentials in your environment
+(`AWS_PROFILE` or `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_REGION`), and a GitHub repository.
+Credentials are never committed.
+
+Exact commands for each task are in its own README:
+
+- Task 1: [`task-1-iac/README.md`](task-1-iac/README.md)
+- Task 2: [`task-2-cicd/README.md`](task-2-cicd/README.md)
+- Task 3: [`task-3-scripting/README.md`](task-3-scripting/README.md)
+
+## 4. Design decisions & trade-offs
+
+### Key decisions
+
+- **Terraform state backend as a separate bootstrap stack.** A backend cannot create itself, so a small stack creates the
+  S3 bucket (versioned, encrypted, public access blocked) and the DynamoDB lock table first. Trade-off: one extra manual step.
+- **Private application tier.** Instances have no public IP and accept traffic only from the ALB's security group. Access
+  is through SSM rather than SSH. Trade-off: outbound internet needs a NAT gateway, which is not free tier.
+- **Single NAT gateway by default.** Cheapest option, but it is a single-AZ dependency for outbound traffic. It is a
+  variable, so one NAT per AZ is a one-line change for production.
+- **Standard-library Python for the API and the health checker.** Few dependencies means a small attack surface, clean
+  scans and nothing to install. Trade-off: a real service would likely use a framework.
+- **Tests run in the pipeline before the image is pushed, and the scan gates the push.** A failure at any stage stops the
+  pipeline before anything reaches ECR.
+- **`ignore-unfixed: true` on the Trivy scan.** The build blocks only on vulnerabilities that have a fix available, so it is
+  not permanently red over base-image issues the team cannot fix yet. Trade-off: unfixed HIGH issues are tolerated until a fix exists.
+
+### What I would do with more time
+
+**CI for the Terraform code.** Right now Task 1 is deployed from a laptop. I would add a pipeline for it:
+
+- on every pull request: `terraform fmt -check`, `terraform validate`, `tflint`, and a security scan such as `checkov` or `tfsec`;
+- run `terraform plan` on the pull request and post the result as a comment, so reviewers see exactly what would change;
+- run `terraform apply` only after merge to `main`, through a protected GitHub environment with required reviewers;
+- a scheduled `terraform plan` job to detect drift, and a cost estimate such as Infracost on pull requests.
+
+**Reusable, versioned workflows shared across services.** The Task 2 workflow is written for a single service. I would turn
+the common parts (test, build, scan, push, deploy) into reusable workflows that any service can call:
+
+- put them in a central repository and expose them with `on: workflow_call`, with inputs (image name, build context, region,
+  severity threshold) and explicit secrets, so each service's own workflow shrinks to a few lines;
+- version them with git tags using semantic versioning (`v1.4.2`) plus a moving major tag (`v1`). Services call
+  `uses: <org>/<workflows-repo>/.github/workflows/build-scan-push.yml@v1` and are only affected by breaking changes when they choose to move to `v2`;
+  security-sensitive consumers can pin to a full commit SHA instead;
+- a Terraform equivalent (shared plan/apply workflow) so infrastructure repos get the same checks.
+
+Trade-off: a shared workflow is a shared dependency. A bad release affects every service that follows the moving tag, which is why
+versioning, testing and pinning options matter.
+
+**Other improvements:**
+
+- HTTPS on the ALB (ACM certificate, HTTP-to-HTTPS redirect) and a WAF.
+- Image signing (cosign), SBOM generation, and Dependabot for dependencies and base images.
+- Implement the staging and production deployments described in the Task 2 README.
+- Split Terraform into modules with per-environment state
+- Extend the health checker into scheduled monitoring with metrics and alerting 
+
+## 5. Assumptions
+
+- Region `us-east-1`, and an AWS account where `t3.micro` is free-tier eligible.
+- The demo uses plain HTTP because no domain or certificate was available.
+- For Task 2, the Amazon ECR repository and an IAM user with push-only permissions already exist. Provisioning them is out of scope.
+- The pipeline triggers on every push to `main`.
+- Staging and production deployment targets (ECS, Kubernetes or similar) are out of scope. Promotion is documented as a design.
+
+## 6. Cleanup
+
+Tear down in this order, then confirm in the console that no ALB, NAT gateway, Elastic IP, EC2 instance or ECR repository remains:
+
 ```bash
-(cd task-1-iac && terraform destroy)
-(cd task-1-iac/bootstrap && terraform apply -var force_destroy=true -auto-approve && terraform destroy)
-aws ecr delete-repository --repository-name ha-web-api --force   # if you created the ECR repo for this exercise
+# Task 1: application stack first, then the state backend
+cd task-1-iac && terraform destroy
+cd bootstrap && terraform apply -var force_destroy=true -auto-approve && terraform destroy
+
+# Task 2: only if you created an ECR repository for testing
+aws ecr delete-repository --repository-name ha-web-api --region us-east-1 --force
 ```
 
-## Assumptions (global)
-- Region `us-east-1`; a new-ish AWS account where `t3.micro` is free-tier eligible.
-- HTTP only for the demo (no domain/certificate); HTTPS is listed as a next step.
-- "Push to main" triggers the pipeline literally (no path filter).
-- For Task 2 the ECR repository and a push-only IAM user already exist (credentials supplied as GitHub secrets).
-- Staging/production *deployment targets* are out of scope; promotion is implemented at the registry level and documented.
-
-## Verification status (please read)
-Verified in the authoring environment: **Task 2 API unit tests (8 passing)**, **Task 3 unit tests (14 passing)**, and an end-to-end run of the
-health checker against the running API confirming exit codes `0` (healthy), `1` (failing after retries) and `2` (config error).
-
-**Not yet executed** (no AWS account, Docker daemon, GitHub runner or Terraform binary in the authoring sandbox): `terraform validate/plan/apply`
-for Task 1, `docker build`, and the GitHub Actions run. Before submitting, run `terraform fmt && terraform validate`, deploy once,
-and fix anything the real platforms flag (provider version drift, action versions, account-specific limits such as instance-type eligibility).
-Commit `.terraform.lock.hcl` after the first `terraform init`.
-
-## What I'd do with more time (cross-cutting)
-HTTPS/WAF, VPC endpoints instead of NAT, CI for Terraform (fmt/validate/tflint/checkov + plan on PR), Terraform modules and per-env
-state, image signing + SBOM, a real staging deployment with automated smoke tests (reusing the Task 3 checker as the gate),
-and CloudWatch/SNS alerting wired to the health checks.
+Then delete the IAM access keys and GitHub secrets you created for the pipeline. Task 3 provisions nothing.

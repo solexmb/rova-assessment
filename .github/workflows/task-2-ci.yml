@@ -17,6 +17,7 @@ concurrency:
 env:
   IMAGE_NAME: ha-web-api
   CONTEXT: task-2-cicd
+  AWS_REGION: us-east-1
 
 jobs:
   test:

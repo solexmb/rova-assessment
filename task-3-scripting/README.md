@@ -41,23 +41,6 @@ CLI flags override env vars. `expected_status` may be an int or a list (e.g. `[2
 **Exit codes:** `0` all passed - `1` at least one endpoint failing after retries - `2` configuration error.
 Logs go to **stderr**, the JSON to **stdout**, so piping to `jq` or a file is safe.
 
-### Example output (real run against the Task 2 API; `history` omitted for brevity)
-```json
-{
-  "timestamp": "2026-10-01T07:41:49.748615+00:00",
-  "duration_seconds": 0.21,
-  "summary": { "total": 2, "passed": 1, "failed": 1, "failed_endpoints": ["broken"], "ok": false },
-  "results": [
-    { "name": "api",    "url": "http://127.0.0.1:8099/health", "expected_status": [200],
-      "status_code": 200, "response_time_ms": 5.9, "passed": true,  "attempts": 1, "error": null },
-    { "name": "broken", "url": "http://127.0.0.1:8099/nope",   "expected_status": [200],
-      "status_code": 404, "response_time_ms": 1.4, "passed": false, "attempts": 2,
-      "error": "unexpected status 404, expected [200]" }
-  ]
-}
-```
-Each result also carries a per-attempt `history` array (status, time, error for every try).
-
 ## Tests
 ```bash
 cd task-3-scripting && python3 -m unittest discover -s tests -t . -v     # 14 tests, spin up a local HTTP server
